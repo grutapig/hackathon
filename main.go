@@ -35,6 +35,14 @@ func main() {
 		panic(err)
 	}
 
+	// Initialize database service
+	dbService, err := NewDatabaseService("hackathon.db")
+	if err != nil {
+		panic(fmt.Sprintf("Failed to initialize database: %v", err))
+	}
+	defer dbService.Close()
+	log.Println("Database service initialized successfully")
+
 	// Initialize user status manager
 	userStatusManager := NewUserStatusManager()
 	userStatusManager.StartPeriodicSave()
@@ -62,18 +70,18 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		MonitoringHandler(twitterApi, newMessageCh)
+		MonitoringHandler(twitterApi, newMessageCh, dbService)
 	}()
 	//handle new message first step
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		FirstStepHandler(newMessageCh, fudChannel, claudeApi, twitterApi, systemPromptFirstStep, userStatusManager)
+		FirstStepHandler(newMessageCh, fudChannel, claudeApi, twitterApi, systemPromptFirstStep, userStatusManager, dbService)
 	}()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		SecondStepHandler(fudChannel, notificationCh, twitterApi, claudeApi, systemPromptSecondStep, userStatusManager, ticker)
+		SecondStepHandler(fudChannel, notificationCh, twitterApi, claudeApi, systemPromptSecondStep, userStatusManager, ticker, dbService)
 	}()
 	//notification handler
 	wg.Add(1)

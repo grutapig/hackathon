@@ -8,7 +8,7 @@ import (
 )
 
 // FirstStepHandler handles new message first step analysis
-func FirstStepHandler(newMessageCh chan twitterapi.NewMessage, fudChannel chan twitterapi.NewMessage, claudeApi *ClaudeApi, twitterApi *twitterapi.TwitterAPIService, systemPromptFirstStep []byte, userStatusManager *UserStatusManager) {
+func FirstStepHandler(newMessageCh chan twitterapi.NewMessage, fudChannel chan twitterapi.NewMessage, claudeApi *ClaudeApi, twitterApi *twitterapi.TwitterAPIService, systemPromptFirstStep []byte, userStatusManager *UserStatusManager, dbService *DatabaseService) {
 	defer close(fudChannel)
 
 	for newMessage := range newMessageCh {

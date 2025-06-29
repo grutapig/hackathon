@@ -8,7 +8,7 @@ import (
 )
 
 // MonitoringHandler handles monitoring for new messages in community
-func MonitoringHandler(twitterApi *twitterapi.TwitterAPIService, newMessageCh chan twitterapi.NewMessage) {
+func MonitoringHandler(twitterApi *twitterapi.TwitterAPIService, newMessageCh chan twitterapi.NewMessage, dbService *DatabaseService) {
 	defer close(newMessageCh)
 
 	monitoringMethod := os.Getenv(ENV_MONITORING_METHOD)
@@ -19,13 +19,13 @@ func MonitoringHandler(twitterApi *twitterapi.TwitterAPIService, newMessageCh ch
 	log.Printf("Starting monitoring with method: %s", monitoringMethod)
 
 	if monitoringMethod == "full_scan" {
-		MonitoringFullScan(twitterApi, newMessageCh)
+		MonitoringFullScan(twitterApi, newMessageCh, dbService)
 	} else {
-		MonitoringIncremental(twitterApi, newMessageCh)
+		MonitoringIncremental(twitterApi, newMessageCh, dbService)
 	}
 }
 
-func MonitoringIncremental(twitterApi *twitterapi.TwitterAPIService, newMessageCh chan twitterapi.NewMessage) {
+func MonitoringIncremental(twitterApi *twitterapi.TwitterAPIService, newMessageCh chan twitterapi.NewMessage, dbService *DatabaseService) {
 	// Local storage exists messages, with reply counts
 	tweetsExistsStorage := map[string]int{}
 
@@ -62,6 +62,9 @@ func MonitoringIncremental(twitterApi *twitterapi.TwitterAPIService, newMessageC
 
 		// Start monitoring
 		for _, tweet := range tweetsResponse.Tweets {
+			// Store tweet and user data
+			storeTweetAndUser(dbService, tweet)
+
 			SendIfNotExistsTweetToChannel(tweet, []string{}, newMessageCh, tweetsExistsStorage, twitterapi.Tweet{}, twitterapi.Tweet{})
 			if tweet.ReplyCount > tweetsExistsStorage[tweet.Id] {
 				tweetsExistsStorage[tweet.Id] = tweet.ReplyCount
@@ -79,6 +82,9 @@ func MonitoringIncremental(twitterApi *twitterapi.TwitterAPIService, newMessageC
 					tweets = append(tweets, tweet.Author.UserName+":"+tweet.Text)
 				}
 				for i, tweetReply := range tweetRepliesResponse.Tweets {
+					// Store reply tweet and user data
+					storeTweetAndUser(dbService, tweetReply)
+
 					SendIfNotExistsTweetToChannel(tweetReply, tweets[i:], newMessageCh, tweetsExistsStorage, tweet, twitterapi.Tweet{})
 					tweetsExistsStorage[tweetReply.Id] = tweetReply.ReplyCount
 				}
@@ -88,7 +94,7 @@ func MonitoringIncremental(twitterApi *twitterapi.TwitterAPIService, newMessageC
 	}
 }
 
-func MonitoringFullScan(twitterApi *twitterapi.TwitterAPIService, newMessageCh chan twitterapi.NewMessage) {
+func MonitoringFullScan(twitterApi *twitterapi.TwitterAPIService, newMessageCh chan twitterapi.NewMessage, dbService *DatabaseService) {
 	processedReplies := map[string]bool{}
 	replyCountStorage := map[string]int{} // Track reply counts like in incremental
 
@@ -129,6 +135,9 @@ func MonitoringFullScan(twitterApi *twitterapi.TwitterAPIService, newMessageCh c
 
 			// Process each reply
 			for _, reply := range tweetRepliesResponse.Tweets {
+				// Store reply tweet and user data
+				storeTweetAndUser(dbService, reply)
+
 				// Check if this is a new reply
 				if !processedReplies[reply.Id] {
 					// Mark as processed
@@ -163,12 +172,6 @@ func MonitoringFullScan(twitterApi *twitterapi.TwitterAPIService, newMessageCh c
 
 					log.Printf("Full scan: found new reply from %s to post %s", reply.Author.UserName, mainTweet.Id)
 				}
-
-				// Process replies to this reply (deeper level) - only if reply count changed
-				if reply.ReplyCount > replyCountStorage[reply.Id] {
-					replyCountStorage[reply.Id] = reply.ReplyCount
-					ProcessReplyRepliesFullScan(twitterApi, reply, mainTweet, newMessageCh, processedReplies, replyCountStorage)
-				}
 			}
 		}
 
@@ -186,62 +189,6 @@ func MonitoringFullScan(twitterApi *twitterapi.TwitterAPIService, newMessageCh c
 				count++
 			}
 			processedReplies = newProcessedReplies
-		}
-	}
-}
-
-// ProcessReplyRepliesFullScan handles replies to replies for full scan monitoring
-func ProcessReplyRepliesFullScan(twitterApi *twitterapi.TwitterAPIService, parentReply twitterapi.Tweet, originalTweet twitterapi.Tweet, newMessageCh chan twitterapi.NewMessage, processedReplies map[string]bool, replyCountStorage map[string]int) {
-	// Always get replies for full scan (no reply count checking)
-	replyRepliesResponse, err := twitterApi.GetTweetReplies(twitterapi.TweetRepliesRequest{
-		TweetID: parentReply.Id,
-	})
-	if err != nil {
-		log.Printf("Error getting replies to reply %s: %v", parentReply.Id, err)
-		return
-	}
-
-	// Process each reply to reply
-	for _, replyReply := range replyRepliesResponse.Tweets {
-		// Check if this is a new reply
-		if !processedReplies[replyReply.Id] {
-			// Mark as processed
-			processedReplies[replyReply.Id] = true
-
-			// Send reply to reply to channel
-			newMessageCh <- twitterapi.NewMessage{
-				TweetID:      replyReply.Id,
-				ReplyTweetID: replyReply.InReplyToId,
-				Author: struct {
-					UserName string
-					Name     string
-					ID       string
-				}{replyReply.Author.UserName, replyReply.Author.Name, replyReply.Author.Id},
-				ParentTweet: struct {
-					ID     string
-					Author string
-					Text   string
-				}{ID: parentReply.Id, Author: parentReply.Author.UserName, Text: parentReply.Text},
-				GrandParentTweet: struct {
-					ID     string
-					Author string
-					Text   string
-				}{ID: originalTweet.Id, Author: originalTweet.Author.UserName, Text: originalTweet.Text},
-				Text:         replyReply.Text,
-				CreatedAt:    replyReply.CreatedAt,
-				ReplyCount:   replyReply.ReplyCount,
-				LikeCount:    replyReply.LikeCount,
-				RetweetCount: replyReply.RetweetCount,
-				TweetsBefore: []string{},
-			}
-
-			log.Printf("Full scan: found reply to reply from %s (depth 2+)", replyReply.Author.UserName)
-		}
-
-		// Go deeper if there are more replies (recursive) - only if reply count changed
-		if replyReply.ReplyCount > replyCountStorage[replyReply.Id] {
-			replyCountStorage[replyReply.Id] = replyReply.ReplyCount
-			ProcessReplyRepliesFullScan(twitterApi, replyReply, originalTweet, newMessageCh, processedReplies, replyCountStorage)
 		}
 	}
 }
@@ -297,5 +244,48 @@ func MarkRepliesAsProcessedRecursive(twitterApi *twitterapi.TwitterAPIService, t
 		if reply.ReplyCount > 0 {
 			MarkRepliesAsProcessedRecursive(twitterApi, reply.Id, processedReplies, replyCountStorage, depth+1)
 		}
+	}
+}
+
+func storeTweetAndUser(dbService *DatabaseService, tweet twitterapi.Tweet) {
+	// Parse created_at time
+	createdAt, err := time.Parse(time.RFC1123, tweet.CreatedAt)
+	if err != nil {
+		// Try alternative time format if RFC1123 fails
+		createdAt, err = time.Parse("Mon Jan 02 15:04:05 -0700 2006", tweet.CreatedAt)
+		if err != nil {
+			log.Printf("Failed to parse tweet created_at: %v", err)
+			createdAt = time.Now() // Fallback to current time
+		}
+	}
+
+	// Store user
+	user := UserModel{
+		ID:       tweet.Author.Id,
+		Username: tweet.Author.UserName,
+		Name:     tweet.Author.Name,
+	}
+
+	// Only store if user doesn't exist (to avoid overwriting existing data)
+	if !dbService.UserExists(tweet.Author.Id) {
+		err = dbService.SaveUser(user)
+		if err != nil {
+			log.Printf("Failed to save user %s: %v", tweet.Author.UserName, err)
+		}
+	}
+
+	// Store tweet
+	tweetModel := TweetModel{
+		ID:          tweet.Id,
+		Text:        tweet.Text,
+		CreatedAt:   createdAt,
+		ReplyCount:  tweet.ReplyCount,
+		UserID:      tweet.Author.Id,
+		InReplyToID: tweet.InReplyToId,
+	}
+
+	err = dbService.SaveTweet(tweetModel)
+	if err != nil {
+		log.Printf("Failed to save tweet %s: %v", tweet.Id, err)
 	}
 }

@@ -9,7 +9,7 @@ import (
 )
 
 // SecondStepHandler handles flagged messages second step analysis
-func SecondStepHandler(fudChannel chan twitterapi.NewMessage, notificationCh chan FUDAlertNotification, twitterApi *twitterapi.TwitterAPIService, claudeApi *ClaudeApi, systemPromptSecondStep []byte, userStatusManager *UserStatusManager, ticker string) {
+func SecondStepHandler(fudChannel chan twitterapi.NewMessage, notificationCh chan FUDAlertNotification, twitterApi *twitterapi.TwitterAPIService, claudeApi *ClaudeApi, systemPromptSecondStep []byte, userStatusManager *UserStatusManager, ticker string, dbService *DatabaseService) {
 	defer close(notificationCh)
 
 	for newMessage := range fudChannel {
@@ -54,6 +54,36 @@ func SecondStepHandler(fudChannel chan twitterapi.NewMessage, notificationCh cha
 		userStatusManager.UpdateUserAfterAnalysis(newMessage.Author.ID, newMessage.Author.UserName, aiDecision2, newMessage.TweetID)
 
 		if aiDecision2.IsFUDMessage {
+			// Store FUD user in database
+			if aiDecision2.IsFUDUser {
+				fudUser := FUDUserModel{
+					UserID:         newMessage.Author.ID,
+					Username:       newMessage.Author.UserName,
+					FUDType:        aiDecision2.FUDType,
+					FUDProbability: aiDecision2.FUDProbability,
+					DetectedAt:     time.Now(),
+					MessageCount:   1,
+					LastMessageID:  newMessage.TweetID,
+				}
+
+				// Check if FUD user already exists
+				if dbService.IsFUDUser(newMessage.Author.ID) {
+					// Increment message count for existing FUD user
+					err = dbService.IncrementFUDUserMessageCount(newMessage.Author.ID, newMessage.TweetID)
+					if err != nil {
+						log.Printf("Failed to increment FUD user message count: %v", err)
+					}
+				} else {
+					// Save new FUD user
+					err = dbService.SaveFUDUser(fudUser)
+					if err != nil {
+						log.Printf("Failed to save FUD user: %v", err)
+					} else {
+						log.Printf("Stored new FUD user: %s", newMessage.Author.UserName)
+					}
+				}
+			}
+
 			// Create FUD alert notification
 			alert := FUDAlertNotification{
 				FUDMessageID:      newMessage.TweetID,
