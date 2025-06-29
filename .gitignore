@@ -9,3 +9,4 @@ friends_data.csv
 *.json
 advanced_search_results.csv
 prompt_simple.txt
+*.db
